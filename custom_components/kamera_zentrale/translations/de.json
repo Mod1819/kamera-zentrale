@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Kamera-Zentrale",
+        "description": "Zeigt alle Reolink-Kameras aus Home Assistant in einem Panel. Die Clips liegen auf dem FTP-Speicher (nginx-Verzeichnisliste).",
+        "data": { "clip_base_url": "Basis-URL der Clip-Ablage" }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Es ist nur eine Instanz erlaubt."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Kamera-Zentrale",
+        "data": { "clip_base_url": "Basis-URL der Clip-Ablage" }
+      }
+    }
+  }
+}
