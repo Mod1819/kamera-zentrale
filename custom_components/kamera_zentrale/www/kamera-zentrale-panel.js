@@ -1,5 +1,5 @@
-/* Kamera-Zentrale – Panel v0.2.0 (iOS/macOS Design)
- * Daten: WebSocket kamera_zentrale/cameras/list + clips/list + detection/get|set, Werte live aus hass.states,
+/* Kamera-Zentrale – Panel v0.3.0 (iOS/macOS Design)
+ * Daten: WebSocket kamera_zentrale/cameras/list + clips/list + detection/get|set + links/*, Werte live aus hass.states,
  * Schreiben über normale HA-Dienste (hass.callService); Erkennungs-Matrix über detection/set (Admin).
  */
 const DOMAIN = "kamera_zentrale";
@@ -37,6 +37,32 @@ function detectPtz(entities) {
   return any ? p : null;
 }
 
+/** Objektive einer Kamera ermitteln (reine Funktion). `entities` = flache Liste {entity_id, domain, translation_key}.
+ *  Gruppiert nach translation_key `main|sub_lens_<N>`; pro N gewinnt main_lens_N. Ohne Objektiv-Entitäten: eine Ansicht
+ *  (erste camera-Entität, Label ""). Ergebnis: [{index, label, entity_id}] nach index sortiert. */
+const LENS_NAMES = ["Weitwinkel", "Tele"];
+function lensesOf(entities) {
+  const cams = (entities || []).filter((e) => e.domain === "camera");
+  const by = new Map();
+  cams.forEach((e) => {
+    const m = /^(main|sub)_lens_(\d+)$/.exec(e.translation_key || "");
+    if (!m) return;
+    const i = Number(m[2]);
+    const cur = by.get(i);
+    if (!cur || (m[1] === "main" && cur.kind !== "main")) by.set(i, { index: i, kind: m[1], entity_id: e.entity_id });
+  });
+  if (!by.size) return cams.length ? [{ index: 0, label: "", entity_id: cams[0].entity_id }] : [];
+  return [...by.values()].sort((a, b) => a.index - b.index)
+    .map(({ index, entity_id }) => ({ index, label: LENS_NAMES[index] || `Objektiv ${index}`, entity_id }));
+}
+
+const LINK_TRIGGER_DOMAINS = ["light", "switch", "binary_sensor", "event", "input_boolean"];
+const LINK_TARGET_DOMAINS = ["light", "switch", "siren"];
+const LINK_SUGGESTION = {
+  name: "Ring Garten-Licht → TrackMix-Scheinwerfer", trigger_entity: "light.garten_light",
+  target_entities: ["light.garten_scheinwerfer"], mode: "follow", hold_seconds: 0, only_dark: false, enabled: true,
+};
+
 class KameraZentralePanel extends HTMLElement {
   constructor() {
     super();
@@ -52,6 +78,9 @@ class KameraZentralePanel extends HTMLElement {
     this._params = new URLSearchParams(location.search);
     this._ptzMove = null; // aktive PTZ-Bewegung {stop, t0}
     this._ptzSpeed = 25;
+    this._page = null; // "links" = Verbund-Seite
+    this._links = null; // Regelliste | {error}
+    this._sheet = null; // Entwurf der Kopplung im Bottom-Sheet
     this._onVis = () => { if (document.hidden) this._ptzEnd(true); };
   }
 
@@ -95,10 +124,30 @@ class KameraZentralePanel extends HTMLElement {
 
   _camera() { return (this._cameras || []).find((c) => c.id === this._cam); }
   _state(eid) { return this._hass.states[eid]; }
-  _liveEntity(cam) {
-    const g = cam.groups.find((x) => x.key === "live");
-    return g && g.entities.find((e) => e.domain === "camera");
+  _lenses(cam) { return lensesOf(cam.groups.flatMap((g) => g.entities)); }
+  _lensGet(id) { try { return Number(localStorage.getItem(`kz_lens_${id}`)); } catch (e) { return NaN; } }
+  _lensSet(id, i) { try { localStorage.setItem(`kz_lens_${id}`, String(i)); } catch (e) { /* egal */ } }
+  /** Anzuzeigende Kamera-Entität: Live = gemerktes Objektiv, Übersicht (overview) = Weitwinkel (Index 0). */
+  _liveEntity(cam, overview = false) {
+    const ls = this._lenses(cam);
+    const want = overview ? 0 : this._lensGet(cam.id);
+    return ls.find((l) => l.index === want) || ls[0];
   }
+  _selectLens(cam, idx) {
+    this._lensSet(cam.id, idx);
+    const live = this._liveEntity(cam);
+    const box = this.shadowRoot.getElementById("stream");
+    if (box && live) { box.innerHTML = this._streamInner(live); this._mountStream(); }
+    this.shadowRoot.querySelectorAll("[data-lens]").forEach((b) => b.classList.toggle("act", Number(b.dataset.lens) === idx));
+  }
+  /** Zoom/Steuerkreuz benutzt -> Tele (Index 1), falls vorhanden. */
+  _autoTele() {
+    const cam = this._camera();
+    if (!cam) return;
+    const tele = this._lenses(cam).find((l) => l.index === 1);
+    if (tele && this._liveEntity(cam).index !== 1) this._selectLens(cam, 1);
+  }
+  _streamInner(live) { return `<img class="big" data-cam="${esc(live.entity_id)}" src="${esc(this._imgUrl(live.entity_id))}" alt="">`; }
   _imgUrl(eid) {
     const st = this._state(eid);
     const token = st && st.attributes.access_token;
@@ -152,13 +201,15 @@ class KameraZentralePanel extends HTMLElement {
     if (this._error && !this._cameras) return `<p class="err">${esc(this._error)}</p>`;
     if (!this._cameras) return `<p class="muted">Lade Kameras …</p>`;
     const cam = this._camera();
-    return cam ? this._detailHtml(cam) : this._overviewHtml();
+    if (cam) return this._detailHtml(cam);
+    return this._page === "links" ? this._linksHtml() : this._overviewHtml();
   }
 
   _overviewHtml() {
-    if (!this._cameras.length) return `<h1>Kameras</h1><p class="muted">Keine Reolink-Kameras gefunden.</p>`;
+    const head = `<div class="ov-head"><h1>Kameras</h1><button class="btn-pill ghost" data-links><ha-icon icon="mdi:link-variant"></ha-icon> Verbund</button></div>`;
+    if (!this._cameras.length) return `${head}<p class="muted">Keine Reolink-Kameras gefunden.</p>`;
     const tiles = this._cameras.map((c) => {
-      const live = this._liveEntity(c);
+      const live = this._liveEntity(c, true);
       const st = live && this._state(live.entity_id);
       const online = st && st.state !== "unavailable";
       return `<div class="tile" data-open="${esc(c.id)}">
@@ -166,7 +217,7 @@ class KameraZentralePanel extends HTMLElement {
         <div class="meta"><b>${esc(c.name)}</b><span class="dot ${online ? "on" : "off"}"></span>${online ? "online" : "offline"}</div>
       </div>`;
     });
-    return `<h1>Kameras</h1><div class="grid">${tiles.join("")}</div>`;
+    return `${head}<div class="grid">${tiles.join("")}</div>`;
   }
 
   _detailHtml(cam) {
@@ -186,7 +237,10 @@ class KameraZentralePanel extends HTMLElement {
       const live = this._liveEntity(cam);
       if (!live) return `<p class="muted">Keine Kamera-Entität.</p>`;
       const ptz = this._ptzHtml(cam);
-      const stream = `<div id="stream"><img class="big" data-cam="${esc(live.entity_id)}" src="${esc(this._imgUrl(live.entity_id))}" alt=""></div>`;
+      const lenses = this._lenses(cam);
+      const seg = lenses.length > 1
+        ? `<div class="seg lens-seg">${lenses.map((l) => `<button class="${l.index === live.index ? "act" : ""}" data-lens="${l.index}">${esc(l.label)}</button>`).join("")}</div>` : "";
+      const stream = `${seg}<div id="stream">${this._streamInner(live)}</div>`;
       return ptz ? `<div class="live-wrap"><div>${stream}</div>${ptz}</div>` : stream;
     }
     if (this._tab === "aufnahmen") return this._clipsHtml();
@@ -252,6 +306,7 @@ class KameraZentralePanel extends HTMLElement {
     const p = cam && detectPtz(this._ptzEntities(cam));
     const eid = p && p.btn[name];
     if (!eid) return;
+    this._autoTele();
     this._ptzMove = { stop: p.btn.stop, t0: Date.now(), name };
     this.shadowRoot.querySelectorAll(`[data-ptz="${name}"]`).forEach((x) => x.classList.add("on"));
     try { navigator.vibrate?.(10); } catch (e) { /* egal */ }
@@ -300,6 +355,180 @@ class KameraZentralePanel extends HTMLElement {
       });
       el.addEventListener("keyup", (ev) => { if (KEYS[ev.key]) this._ptzEnd(); });
       el.addEventListener("blur", () => this._ptzEnd(true));
+    });
+  }
+
+  // ---------- Verbund (Kopplungen) ----------
+
+  _isAdmin() { return !!(this._hass && this._hass.user && this._hass.user.is_admin); }
+  _fname(eid) { const st = this._state(eid); return (st && st.attributes.friendly_name) || eid; }
+  _entIds(domains) { return Object.keys(this._hass.states).filter((e) => domains.includes(e.split(".")[0])); }
+
+  async _loadLinks(blank = true) {
+    if (blank) this._links = null;
+    this._render();
+    try {
+      this._links = await this._hass.callWS({ type: `${DOMAIN}/links/list` });
+    } catch (e) {
+      this._links = { error: e.message || String(e) };
+    }
+    this._render();
+  }
+
+  /** Re-Render der Verbund-Seite mit erhaltener Scrollposition des Sheets. */
+  _linksRender() {
+    const old = this.shadowRoot.querySelector(".sheet");
+    const top = old ? old.scrollTop : 0;
+    this._render();
+    const sheet = this.shadowRoot.querySelector(".sheet");
+    if (sheet) sheet.scrollTop = top;
+  }
+
+  async _linkCall(type, data, ok) {
+    try {
+      await this._hass.callWS({ type: `${DOMAIN}/links/${type}`, ...data });
+    } catch (e) {
+      this._toast(e.message || String(e));
+      return false;
+    }
+    if (ok) this._toast(ok);
+    return true;
+  }
+
+  _linksHtml() {
+    const L = this._links;
+    const admin = this._isAdmin();
+    const head = `<div class="head"><button class="back-btn" data-links-back>‹ Kameras</button><div class="head-title"><h1>Verbund</h1>
+      <p class="subhead">Geräte miteinander koppeln</p></div>${admin ? `<button class="btn-pill" data-rule-new>+ Neue Kopplung</button>` : ""}</div>`;
+    if (!L) return `${head}<p class="muted">Lade Kopplungen …</p>`;
+    if (L.error) return `${head}<p class="err">${esc(L.error)}</p>`;
+    const S = LINK_SUGGESTION;
+    const st = this._hass.states;
+    const sug = admin && st[S.trigger_entity] && st[S.target_entities[0]]
+      && !L.rules.some((r) => r.trigger_entity === S.trigger_entity && r.target_entities.includes(S.target_entities[0]))
+      ? `<div class="section"><h3>Vorschlag</h3><div class="ctrls"><div class="ctrl"><label>${esc(S.name)}</label>
+        <div class="in"><button class="btn-pill" data-rule-sug>Anlegen</button></div></div></div></div>` : "";
+    const rows = L.rules.map((r) => {
+      const info = `${r.mode === "pulse" ? "Impuls" : "Mitlaufen"} · Nachlauf ${r.hold_seconds} s${r.only_dark ? " · nur bei Dunkelheit" : ""}`;
+      return `<div class="ctrl rule"><label><b>${esc(r.name)}</b><span class="muted rule-sub">Wenn ${esc(this._fname(r.trigger_entity))} → ${esc(r.target_entities.map((t) => this._fname(t)).join(", "))}</span>
+        <span class="hint">${esc(info)}</span></label><div class="in">
+        <label class="toggle-wrap"><input type="checkbox" class="toggle" data-rule-en="${esc(r.id)}"${r.enabled ? " checked" : ""}${admin ? "" : " disabled"}><div class="toggle-track"></div></label>
+        ${admin ? `<button class="icon-btn" data-rule-edit="${esc(r.id)}" aria-label="Bearbeiten"><ha-icon icon="mdi:pencil"></ha-icon></button>
+        <button class="icon-btn" data-rule-del="${esc(r.id)}" aria-label="Löschen"><ha-icon icon="mdi:delete"></ha-icon></button>` : ""}</div></div>`;
+    }).join("");
+    const list = L.rules.length ? `<div class="ctrls">${rows}</div>` : `<p class="muted">Noch keine Kopplungen.</p>`;
+    return `${head}${sug}${list}${this._sheet ? this._sheetHtml() : ""}`;
+  }
+
+  /** Auswahlzeilen für Auslöser (kind="trig") oder Ziele (kind="tgt"), gefiltert nach Suchtext. */
+  _pickRows(kind, q) {
+    q = q.trim().toLowerCase();
+    const d = this._sheet;
+    const reo = new Set((this._cameras || []).flatMap((c) => c.groups.flatMap((g) => g.entities)).filter((e) => ["light", "siren"].includes(e.domain)).map((e) => e.entity_id));
+    let ids = this._entIds(kind === "trig" ? LINK_TRIGGER_DOMAINS : LINK_TARGET_DOMAINS);
+    const match = (e) => this._fname(e).toLowerCase().includes(q) || e.includes(q);
+    if (q) ids = ids.filter(match);
+    else if (kind === "tgt") ids = ids.filter((e) => reo.has(e));
+    ids.sort((a, b) => (kind === "tgt" ? (reo.has(b) - reo.has(a)) : 0) || this._fname(a).localeCompare(this._fname(b)));
+    ids = ids.slice(0, kind === "trig" ? 8 : 30);
+    if (!ids.length) return `<p class="muted pick-empty">${q ? "Nichts gefunden." : "Keine Vorschläge – oben suchen."}</p>`;
+    return ids.map((e) => {
+      const on = kind === "trig" ? d.trigger_entity === e : d.target_entities.includes(e);
+      return `<div class="pick-row" data-pick-${kind}="${esc(e)}"><span>${esc(this._fname(e))}<small>${esc(e)}</small></span><span class="chk">${on ? "✓" : ""}</span></div>`;
+    }).join("");
+  }
+
+  _sheetHtml() {
+    const d = this._sheet;
+    const q = this._sheetQ || { trig: "", tgt: "" };
+    const min = d.mode === "pulse" ? 10 : 0;
+    const chips = d.target_entities.map((t) => `<button class="chip" data-untgt="${esc(t)}">${esc(this._fname(t))} ✕</button>`).join("");
+    return `<div class="backdrop" data-sh-cancel></div><div class="sheet" role="dialog" aria-label="Kopplung">
+      <h2>${d.id ? "Kopplung bearbeiten" : "Neue Kopplung"}</h2>
+      <label class="fld">Name<input type="text" class="txt" data-sh="name" maxlength="60" value="${esc(d.name)}"></label>
+      <h3>Auslöser</h3>
+      ${d.trigger_entity ? `<div class="chips"><span class="chip sel">${esc(this._fname(d.trigger_entity))}</span></div>` : ""}
+      <input type="search" class="txt" placeholder="Suchen …" data-sh="q-trig" value="${esc(q.trig)}">
+      <div class="pick" id="sh-list-trig">${this._pickRows("trig", q.trig)}</div>
+      <h3>Ziele</h3>
+      ${chips ? `<div class="chips">${chips}</div>` : ""}
+      <input type="search" class="txt" placeholder="Suchen …" data-sh="q-tgt" value="${esc(q.tgt)}">
+      <div class="pick" id="sh-list-tgt">${this._pickRows("tgt", q.tgt)}</div>
+      <h3>Verhalten</h3>
+      <div class="seg"><button class="${d.mode === "follow" ? "act" : ""}" data-mode="follow">Mitlaufen</button><button class="${d.mode === "pulse" ? "act" : ""}" data-mode="pulse">Impuls</button></div>
+      <div class="ctrls"><div class="ctrl"><label>Nachlaufzeit</label><div class="in"><input type="range" class="slider" min="${min}" max="600" step="5" value="${Math.max(min, d.hold_seconds)}" data-sh="hold"><span class="val" id="sh-hold-val">${Math.max(min, d.hold_seconds)} s</span></div></div>
+      <div class="ctrl"><label>Nur bei Dunkelheit</label><div class="in"><label class="toggle-wrap"><input type="checkbox" class="toggle" data-sh="dark"${d.only_dark ? " checked" : ""}><div class="toggle-track"></div></label></div></div></div>
+      <div class="sheet-btns">${d.id ? `<button class="btn-pill ghost" data-sh-test>Testen</button>` : ""}<span class="grow"></span>
+        <button class="btn-pill ghost" data-sh-cancel>Abbrechen</button><button class="btn-pill" data-sh-save>Speichern</button></div>
+    </div>`;
+  }
+
+  _sheetOpen(rule) {
+    this._sheet = rule ? { ...rule, target_entities: [...rule.target_entities] }
+      : { name: "", trigger_entity: "", target_entities: [], mode: "follow", hold_seconds: 0, only_dark: false, enabled: true };
+    this._sheetQ = { trig: "", tgt: "" };
+    this._linksRender();
+  }
+
+  async _sheetSave() {
+    const d = this._sheet;
+    const name = d.name.trim();
+    if (!name) return this._toast("Bitte einen Namen eingeben.");
+    if (!d.trigger_entity) return this._toast("Bitte einen Auslöser wählen.");
+    if (!d.target_entities.length) return this._toast("Bitte mindestens ein Ziel wählen.");
+    const rule = { name, enabled: d.enabled, trigger_entity: d.trigger_entity, target_entities: d.target_entities,
+      mode: d.mode, hold_seconds: Math.round(d.hold_seconds), only_dark: d.only_dark };
+    if (d.id) rule.id = d.id;
+    if (await this._linkCall("save", { rule })) { this._sheet = null; this._loadLinks(false); }
+  }
+
+  _linksBind(root) {
+    const $ = (sel, fn) => root.querySelectorAll(sel).forEach(fn);
+    $("[data-rule-new]", (el) => el.addEventListener("click", () => this._sheetOpen(null)));
+    $("[data-rule-edit]", (el) => el.addEventListener("click", () => this._sheetOpen(this._links.rules.find((r) => r.id === el.dataset.ruleEdit))));
+    $("[data-rule-del]", (el) => el.addEventListener("click", async () => {
+      const r = this._links.rules.find((x) => x.id === el.dataset.ruleDel);
+      if (r && confirm(`Kopplung „${r.name}“ löschen?`) && await this._linkCall("delete", { rule_id: r.id })) this._loadLinks(false);
+    }));
+    $("[data-rule-en]", (el) => el.addEventListener("change", async () => {
+      const r = this._links.rules.find((x) => x.id === el.dataset.ruleEn);
+      if (!r) return;
+      const { id, name, trigger_entity, target_entities, mode, hold_seconds, only_dark } = r;
+      const ok = await this._linkCall("save", { rule: { id, name, trigger_entity, target_entities, mode, hold_seconds, only_dark, enabled: el.checked } });
+      if (ok) this._loadLinks(false); else el.checked = !el.checked;
+    }));
+    $("[data-rule-sug]", (el) => el.addEventListener("click", async () => {
+      if (await this._linkCall("save", { rule: LINK_SUGGESTION })) this._loadLinks(false);
+    }));
+    const d = this._sheet;
+    if (!d) return;
+    const val = (k) => root.querySelector(`[data-sh="${k}"]`);
+    val("name").addEventListener("input", (ev) => { d.name = ev.target.value; });
+    ["trig", "tgt"].forEach((k) => val(`q-${k}`).addEventListener("input", (ev) => {
+      this._sheetQ[k] = ev.target.value;
+      root.getElementById(`sh-list-${k}`).innerHTML = this._pickRows(k, ev.target.value);
+    }));
+    val("hold").addEventListener("input", (ev) => { d.hold_seconds = Number(ev.target.value); root.getElementById("sh-hold-val").textContent = `${ev.target.value} s`; });
+    val("dark").addEventListener("change", (ev) => { d.only_dark = ev.target.checked; });
+    $("[data-sh-cancel]", (el) => el.addEventListener("click", () => { this._sheet = null; this._linksRender(); }));
+    $("[data-sh-save]", (el) => el.addEventListener("click", () => this._sheetSave()));
+    $("[data-sh-test]", (el) => el.addEventListener("click", () => this._linkCall("test", { rule_id: d.id }, "Test läuft: Ziele 10 s an.")));
+    $("[data-mode]", (el) => el.addEventListener("click", () => {
+      d.mode = el.dataset.mode;
+      if (d.mode === "pulse" && d.hold_seconds < 10) d.hold_seconds = 10;
+      this._linksRender();
+    }));
+    $("[data-untgt]", (el) => el.addEventListener("click", () => { d.target_entities = d.target_entities.filter((t) => t !== el.dataset.untgt); this._linksRender(); }));
+    // Auswahlzeilen ändern sich beim Tippen -> Delegation auf dem Sheet
+    root.querySelector(".sheet").addEventListener("click", (ev) => {
+      const t = ev.target.closest("[data-pick-trig]");
+      const g = ev.target.closest("[data-pick-tgt]");
+      if (t) { d.trigger_entity = t.dataset.pickTrig; this._sheetQ.trig = ""; this._linksRender(); }
+      else if (g) {
+        const e = g.dataset.pickTgt;
+        d.target_entities = d.target_entities.includes(e) ? d.target_entities.filter((x) => x !== e) : [...d.target_entities, e];
+        this._linksRender();
+      }
     });
   }
 
@@ -515,6 +744,10 @@ class KameraZentralePanel extends HTMLElement {
     const $ = (sel, fn) => root.querySelectorAll(sel).forEach(fn);
     $("[data-open]", (el) => el.addEventListener("click", () => { this._cam = el.dataset.open; this._tab = "live"; this._error = ""; this._render(); }));
     $("[data-back]", (el) => el.addEventListener("click", () => { this._cam = null; this._clips = null; this._clipSrc = ""; this._error = ""; this._render(); }));
+    $("[data-lens]", (el) => el.addEventListener("click", () => this._selectLens(this._camera(), Number(el.dataset.lens))));
+    $("[data-links]", (el) => el.addEventListener("click", () => { this._page = "links"; this._error = ""; this._loadLinks(); }));
+    $("[data-links-back]", (el) => el.addEventListener("click", () => { this._page = null; this._sheet = null; this._render(); }));
+    this._linksBind(root);
     $("[data-tab]", (el) => el.addEventListener("click", () => {
       this._tab = el.dataset.tab; this._error = "";
       if (this._tab === "aufnahmen") this._loadClips();
@@ -534,7 +767,11 @@ class KameraZentralePanel extends HTMLElement {
       else if (act === "toggle") el.addEventListener("change", () => call(dom, el.checked ? "turn_on" : "turn_off", { entity_id: eid }));
       else if (act === "brightness") el.addEventListener("change", () => call("light", "turn_on", { entity_id: eid, brightness: Number(el.value) }));
       else if (act === "number") {
-        el.addEventListener("input", () => { const v = root.querySelector(`[data-val="${eid}"]`); if (v) v.textContent = el.value; });
+        el.addEventListener("input", () => {
+          const v = root.querySelector(`[data-val="${eid}"]`); if (v) v.textContent = el.value;
+          const cam = this._camera(); const p = cam && detectPtz(this._ptzEntities(cam));
+          if (p && p.zoom === eid) this._autoTele();
+        });
         el.addEventListener("change", () => call("number", "set_value", { entity_id: eid, value: Number(el.value) }));
       } else if (act === "select") el.addEventListener("change", () => call("select", "select_option", { entity_id: eid, option: el.value }));
     });
@@ -951,6 +1188,41 @@ const STYLE = `
   .ptz-preset { cursor: pointer; min-height: 44px; padding: 8px 14px; font: inherit; font-size: 0.8125em; }
   .ptz-preset::before { display: none; }
   .ptz-preset:active { opacity: 0.7; }
+
+  .ov-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+  .ov-head h1 { margin: 0; }
+  .btn-pill.ghost { background: var(--card-background-color, #f5f5f5); color: var(--primary-color, #0a84ff); display: inline-flex; align-items: center; gap: 6px; min-height: 36px; }
+  .btn-pill.ghost ha-icon { color: inherit; --mdc-icon-size: 18px; }
+  .icon-btn { background: transparent; border: 0; width: 44px; height: 44px; border-radius: 50%; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+  .icon-btn:active { background: rgba(127, 127, 127, 0.2); }
+  .seg { display: flex; background: rgba(127, 127, 127, 0.16); border-radius: 12px; padding: 2px; margin: 0 0 12px; }
+  .seg button { flex: 1; border: 0; background: transparent; color: var(--primary-text-color, #000); font: inherit; font-size: 0.9375em; min-height: 36px; border-radius: 10px; cursor: pointer; transition: all 150ms ease; }
+  .seg button.act { background: var(--card-background-color, #fff); font-weight: 600; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2); }
+  .rule { align-items: center; }
+  .rule > label { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .rule-sub { overflow-wrap: anywhere; }
+  .rule .in { flex-shrink: 0; gap: 4px; }
+  .backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.4); z-index: 900; animation: fadeIn 150ms ease; }
+  .sheet {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 901; max-height: 90vh; overflow-y: auto; box-sizing: border-box;
+    max-width: 640px; margin: 0 auto; padding: 8px 16px max(16px, env(safe-area-inset-bottom));
+    background: var(--primary-background-color, #fff); border-radius: 20px 20px 0 0; box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.25);
+    animation: slideUp 250ms ease;
+  }
+  .sheet h2 { font-size: 1.25em; margin: 12px 0 8px; }
+  .sheet h3 { margin: 18px 0 8px; }
+  .fld { display: block; font-size: 0.8125em; color: var(--secondary-text-color, #999); }
+  .txt { width: 100%; box-sizing: border-box; margin-top: 4px; padding: 10px 14px; min-height: 44px; font: inherit; font-size: 1em; color: inherit; background: var(--card-background-color, #f5f5f5); border: 0; border-radius: 12px; outline: 0; }
+  .pick { margin-top: 8px; background: var(--card-background-color, #f5f5f5); border-radius: 14px; overflow: hidden; max-height: 220px; overflow-y: auto; }
+  .pick-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 14px; min-height: 24px; cursor: pointer; border-bottom: 1px solid rgba(127, 127, 127, 0.2); }
+  .pick-row:last-child { border-bottom: 0; }
+  .pick-row small { display: block; color: var(--secondary-text-color, #999); font-size: 0.75em; }
+  .pick-row .chk { color: var(--primary-color, #0a84ff); font-weight: 700; }
+  .pick-empty { padding: 10px 14px; margin: 0; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  .chip { border: 0; border-radius: 16px; padding: 6px 12px; font: inherit; font-size: 0.8125em; background: var(--primary-color, #0a84ff); color: #fff; cursor: pointer; }
+  .sheet-btns { display: flex; align-items: center; gap: 8px; margin-top: 18px; }
+  .grow { flex: 1; }
 
   @media (min-width: 900px) {
     .live-wrap { grid-template-columns: 1fr 320px; }

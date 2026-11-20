@@ -4,6 +4,8 @@
   kamera_zentrale/clips/list {camera_id}
   kamera_zentrale/detection/get {camera_id}
   kamera_zentrale/detection/set {camera_id, action, type, enable}  (nur Admin; schreibt an die Kamera)
+  kamera_zentrale/links/list
+  kamera_zentrale/links/save {rule}  /links/delete {rule_id}  /links/test {rule_id}  (nur Admin)
 """
 from __future__ import annotations
 
@@ -16,7 +18,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from . import cameras, clips, detection
+from . import cameras, clips, detection, links
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -28,6 +30,8 @@ def async_register(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_clips_list)
     websocket_api.async_register_command(hass, ws_detection_get)
     websocket_api.async_register_command(hass, ws_detection_set)
+    for cmd in (ws_links_list, ws_links_save, ws_links_delete, ws_links_test):
+        websocket_api.async_register_command(hass, cmd)
 
 
 @websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/cameras/list"})
@@ -80,3 +84,62 @@ async def ws_detection_set(hass, connection, msg):
         connection.send_error(msg["id"], err.code, err.message)
         return
     connection.send_result(msg["id"], res)
+
+
+def _manager(hass, connection, msg):
+    mgr = hass.data.get(DOMAIN, {}).get("links")
+    if mgr is None:
+        connection.send_error(msg["id"], "not_loaded", "Kamera-Zentrale nicht geladen")
+    return mgr
+
+
+@websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/links/list"})
+@callback
+def ws_links_list(hass, connection, msg):
+    if mgr := _manager(hass, connection, msg):
+        connection.send_result(msg["id"], {"rules": mgr.async_list()})
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command({
+    vol.Required("type"): f"{DOMAIN}/links/save",
+    vol.Required("rule"): links.RULE_SCHEMA,
+})
+@websocket_api.async_response
+async def ws_links_save(hass, connection, msg):
+    if not (mgr := _manager(hass, connection, msg)):
+        return
+    try:
+        rule = await mgr.async_save(msg["rule"])
+    except links.LinkError as err:
+        connection.send_error(msg["id"], err.code, err.message)
+        return
+    connection.send_result(msg["id"], {"rule": rule})
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/links/delete", vol.Required("rule_id"): str})
+@websocket_api.async_response
+async def ws_links_delete(hass, connection, msg):
+    if not (mgr := _manager(hass, connection, msg)):
+        return
+    try:
+        await mgr.async_delete(msg["rule_id"])
+    except links.LinkError as err:
+        connection.send_error(msg["id"], err.code, err.message)
+        return
+    connection.send_result(msg["id"])
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/links/test", vol.Required("rule_id"): str})
+@callback
+def ws_links_test(hass, connection, msg):
+    if not (mgr := _manager(hass, connection, msg)):
+        return
+    try:
+        mgr.async_test(msg["rule_id"])
+    except links.LinkError as err:
+        connection.send_error(msg["id"], err.code, err.message)
+        return
+    connection.send_result(msg["id"])

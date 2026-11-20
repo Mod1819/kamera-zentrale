@@ -6,7 +6,13 @@ Sie baut keine eigene Kameraverbindung auf, sondern nutzt die Entitäten der off
 
 ## Funktionen
 
-### v0.2.0 (Aktuell: Apple-Stil + Status-Anzeige)
+### v0.3.0 (Aktuell: Objektiv-Umschalter + Verbund)
+- **Objektiv-Umschalter**: Kameras mit mehreren Objektiven (z. B. TrackMix) zeigen im Live-Reiter „Weitwinkel | Tele“. Pro Objektiv wird `main_lens_N` bevorzugt, sonst `sub_lens_N`. Zoom (Slider/±) oder Steuerkreuz schaltet automatisch auf Tele; die Auswahl wird pro Kamera gemerkt. Die Übersicht zeigt das Weitwinkel. (Behebt: Zoom „wirkte nicht“, weil das Weitwinkel-Bild gezeigt wurde.)
+- **Verbund** (Knopf oben rechts in der Übersicht): Kopplungen Auslöser → Ziele, z. B. Ring-Gartenlicht schaltet den TrackMix-Scheinwerfer mit. Modus *Mitlaufen* (Ziele folgen dem Auslöser, optional mit Nachlaufzeit) oder *Impuls* (Ziele für mind. 10 s an, erneuter Impuls verlängert; Event-Entitäten wirken immer als Impuls), optional nur bei Dunkelheit (`sun.sun`). Es werden nur Ziele ausgeschaltet, die die Regel selbst eingeschaltet hat. Regeln liegen im HA-Store (`kamera_zentrale.links`), Bearbeiten nur für Admins. Es wird keine Regel automatisch angelegt; ein Vorschlag erscheint nur zum Antippen.
+- WebSocket: `kamera_zentrale/links/list|save|delete|test` (`delete`/`test` mit `rule_id`).
+- Nach HA-Neustart laufende Nachlauf-Timer entfallen (nicht persistiert).
+
+### v0.2.0 (Apple-Stil + Status-Anzeige)
 - **Design**: Modern, iOS/macOS-Stil – Apple-Systemschriften, HA-Farbvariablen, weiche Schatten, großzügige Abstände
 - **Status-Sensoren**: binary_sensor jetzt Statuspille (Dot + Text), nicht Toggle
 - **Erkennung-Reiter**: Neu strukturiert – „Live-Status" (Pillen oben) + „Einstellungen" (darunter)

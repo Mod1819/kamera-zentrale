@@ -6,7 +6,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
-from . import clips, panel, websocket
+from . import clips, links, panel, websocket
 from .const import DOMAIN
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -27,9 +27,14 @@ async def _async_reload(hass: HomeAssistant, entry: ConfigEntry) -> None:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.async_on_unload(entry.add_update_listener(_async_reload))
     await panel.async_register_panel(hass)
+    mgr = links.LinkManager(hass)
+    await mgr.async_load()
+    hass.data.setdefault(DOMAIN, {})["links"] = mgr
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     panel.async_remove_panel(hass)
+    if mgr := hass.data.get(DOMAIN, {}).pop("links", None):
+        mgr.async_unload()
     return True

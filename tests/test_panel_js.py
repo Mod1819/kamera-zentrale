@@ -47,3 +47,35 @@ def test_detect_ptz_full():
 def test_detect_ptz_entity_id_fallback():
     p = _detect([_e("button.cam_ptz_up"), _e("button.cam_ptz_stop")])
     assert p["btn"]["up"] == "button.cam_ptz_up" and p["btn"]["stop"] == "button.cam_ptz_stop"
+
+
+def _lenses(entities):
+    import json
+    prog = (
+        "const vm=require('vm'),fs=require('fs');const c=vm.createContext({HTMLElement:class{},"
+        "customElements:{define(){}},location:{search:''},URLSearchParams});"
+        f"vm.runInContext(fs.readFileSync({json.dumps(str(JS))},'utf8'),c);"
+        f"console.log(JSON.stringify(vm.runInContext('lensesOf('+{json.dumps(json.dumps(entities))}+')',c)));"
+    )
+    r = subprocess.run(["node", "-e", prog], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout)
+
+
+def test_lenses_none_and_single_view():
+    assert _lenses([_e("switch.x")]) == []
+    assert _lenses([_e("camera.cam_a", "fluent"), _e("camera.cam_b", "clear")]) == [
+        {"index": 0, "label": "", "entity_id": "camera.cam_a"}]
+
+
+def test_lenses_trackmix_sub_only():
+    got = _lenses([_e("camera.g_obj_1", "sub_lens_1"), _e("camera.g_obj_0", "sub_lens_0"), _e("switch.x")])
+    assert got == [{"index": 0, "label": "Weitwinkel", "entity_id": "camera.g_obj_0"},
+                   {"index": 1, "label": "Tele", "entity_id": "camera.g_obj_1"}]
+
+
+def test_lenses_prefer_main_and_extra_label():
+    got = _lenses([_e("camera.s0", "sub_lens_0"), _e("camera.m0", "main_lens_0"),
+                   _e("camera.m1", "main_lens_1"), _e("camera.s2", "sub_lens_2")])
+    assert [(x["index"], x["label"], x["entity_id"]) for x in got] == [
+        (0, "Weitwinkel", "camera.m0"), (1, "Tele", "camera.m1"), (2, "Objektiv 2", "camera.s2")]
