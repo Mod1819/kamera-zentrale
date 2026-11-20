@@ -6,7 +6,32 @@ Sie baut keine eigene Kameraverbindung auf, sondern nutzt die Entitäten der off
 
 ## Funktionen
 
-### v0.3.0 (Aktuell: Objektiv-Umschalter + Verbund)
+### v0.4.0 (Aktuell: Push-Link öffnet den passenden Clip)
+- Link `/kameras?camera=<device_id>&at=<YYYYMMDDHHMMSS>` (lokale Zeit der Bewegung) öffnet Aufnahmen und spielt den Clip mit Start in [at−90 s, at+30 s] (bei mehreren der zeitlich nächste) sofort ab.
+- Clip noch nicht da (Push kommt ~3 s nach der Bewegung, Clip erst 1–3 min später): Overlay „Clip wird verarbeitet …“, Liste wird alle 5 s neu geladen, Wiedergabe startet automatisch. Abbrechen möglich; nach 6 min „Kein passender Clip gefunden“. Polling pausiert bei verstecktem Tab.
+- Bewegung ohne eigenen Clip (neuester Clip startet nach at+30 s): nächstälterer Clip mit Hinweis.
+- `at`/`clip` werden danach aus der URL entfernt (Neuladen wartet nicht erneut).
+
+#### Push-Link (Beispiel-Automation)
+Die Benachrichtigung muss die Bewegungszeit als lokale Zeit `%Y%m%d%H%M%S` in den Link einsetzen:
+```yaml
+automation:
+  - alias: Bewegung Garten – Push mit Clip-Link
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.garten_person   # anpassen
+        to: "on"
+    actions:
+      - action: notify.mobile_app_handy          # anpassen
+        data:
+          title: Person im Garten
+          message: Tippen für den Clip
+          data:
+            url: "/kameras?camera=<device_id>&at={{ now().strftime('%Y%m%d%H%M%S') }}"
+            clickAction: "/kameras?camera=<device_id>&at={{ now().strftime('%Y%m%d%H%M%S') }}"
+```
+
+### v0.3.0 (Objektiv-Umschalter + Verbund)
 - **Objektiv-Umschalter**: Kameras mit mehreren Objektiven (z. B. TrackMix) zeigen im Live-Reiter „Weitwinkel | Tele“. Pro Objektiv wird `main_lens_N` bevorzugt, sonst `sub_lens_N`. Zoom (Slider/±) oder Steuerkreuz schaltet automatisch auf Tele; die Auswahl wird pro Kamera gemerkt. Die Übersicht zeigt das Weitwinkel. (Behebt: Zoom „wirkte nicht“, weil das Weitwinkel-Bild gezeigt wurde.)
 - **Verbund** (Knopf oben rechts in der Übersicht): Kopplungen Auslöser → Ziele, z. B. Ring-Gartenlicht schaltet den TrackMix-Scheinwerfer mit. Modus *Mitlaufen* (Ziele folgen dem Auslöser, optional mit Nachlaufzeit) oder *Impuls* (Ziele für mind. 10 s an, erneuter Impuls verlängert; Event-Entitäten wirken immer als Impuls), optional nur bei Dunkelheit (`sun.sun`). Es werden nur Ziele ausgeschaltet, die die Regel selbst eingeschaltet hat. Regeln liegen im HA-Store (`kamera_zentrale.links`), Bearbeiten nur für Admins. Es wird keine Regel automatisch angelegt; ein Vorschlag erscheint nur zum Antippen.
 - WebSocket: `kamera_zentrale/links/list|save|delete|test` (`delete`/`test` mit `rule_id`).

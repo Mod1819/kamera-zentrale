@@ -1,4 +1,4 @@
-/* Kamera-Zentrale – Panel v0.3.0 (iOS/macOS Design)
+/* Kamera-Zentrale – Panel v0.4.0 (iOS/macOS Design)
  * Daten: WebSocket kamera_zentrale/cameras/list + clips/list + detection/get|set + links/*, Werte live aus hass.states,
  * Schreiben über normale HA-Dienste (hass.callService); Erkennungs-Matrix über detection/set (Admin).
  */
@@ -56,6 +56,29 @@ function lensesOf(entities) {
     .map(({ index, entity_id }) => ({ index, label: LENS_NAMES[index] || `Objektiv ${index}`, entity_id }));
 }
 
+/** Passenden Clip zu einer Bewegung wählen (reine Funktion). `at` = "YYYYMMDDHHMMSS" (lokale Zeit), `clips` = [{filename, time(ISO lokal)}].
+ *  play: Start in [at-90s, at+30s], zeitlich nächster. wait: kein Kandidat und neuester Clip (oder keiner) vor at-90s.
+ *  fallback: neuester Clip nach at+30s -> nächster Clip mit Start <= at (clip fehlt, wenn es keinen gibt). */
+const AT_BEFORE_MS = 90000, AT_AFTER_MS = 30000;
+function parseAt(at) {
+  const m = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/.exec(String(at || ""));
+  if (!m) return NaN;
+  const d = new Date(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
+  return d.getMonth() === m[2] - 1 ? d.getTime() : NaN; // 13. Monat etc. ablehnen
+}
+function pickClip(clips, at) {
+  const t = typeof at === "number" ? at : parseAt(at);
+  const list = (clips || []).map((c) => ({ c, t: new Date(c.time).getTime() })).filter((x) => !isNaN(x.t));
+  const cands = list.filter((x) => x.t >= t - AT_BEFORE_MS && x.t <= t + AT_AFTER_MS);
+  if (cands.length) return { state: "play", clip: cands.reduce((a, b) => (Math.abs(b.t - t) < Math.abs(a.t - t) ? b : a)).c };
+  const newest = Math.max(-Infinity, ...list.map((x) => x.t));
+  if (newest < t - AT_BEFORE_MS) return { state: "wait" };
+  const before = list.filter((x) => x.t <= t);
+  return before.length ? { state: "fallback", clip: before.reduce((a, b) => (b.t > a.t ? b : a)).c } : { state: "fallback" };
+}
+
+const AT_TIMEOUT_MS = 6 * 60000, AT_POLL_MS = 5000;
+
 const LINK_TRIGGER_DOMAINS = ["light", "switch", "binary_sensor", "event", "input_boolean"];
 const LINK_TARGET_DOMAINS = ["light", "switch", "siren"];
 const LINK_SUGGESTION = {
@@ -81,7 +104,13 @@ class KameraZentralePanel extends HTMLElement {
     this._page = null; // "links" = Verbund-Seite
     this._links = null; // Regelliste | {error}
     this._sheet = null; // Entwurf der Kopplung im Bottom-Sheet
-    this._onVis = () => { if (document.hidden) this._ptzEnd(true); };
+    this._at = null; // Push-Link: {at, deadline, state: "wait"|"none"}
+    this._atTimer = null;
+    this._clipNote = "";
+    this._onVis = () => {
+      if (document.hidden) { this._ptzEnd(true); clearTimeout(this._atTimer); }
+      else if (this._at && this._at.state === "wait") this._atPoll();
+    };
   }
 
   set hass(hass) {
@@ -100,6 +129,7 @@ class KameraZentralePanel extends HTMLElement {
     clearInterval(this._timer);
     document.removeEventListener("visibilitychange", this._onVis);
     this._ptzEnd(true);
+    clearTimeout(this._atTimer);
   }
 
   async _load() {
@@ -109,6 +139,13 @@ class KameraZentralePanel extends HTMLElement {
       const want = this._params.get("camera");
       if (want && this._cameras.some((c) => c.id === want)) {
         this._cam = want;
+        if (parseAt(this._params.get("at")) > 0) {
+          this._tab = "aufnahmen";
+          this._at = { at: this._params.get("at"), deadline: Date.now() + AT_TIMEOUT_MS, state: "wait" };
+          await this._loadClips();
+          this._atEval();
+          return;
+        }
         if (this._params.get("clip")) {
           this._tab = "aufnahmen";
           await this._loadClips();
@@ -172,6 +209,51 @@ class KameraZentralePanel extends HTMLElement {
     }
     this._render();
   }
+
+  /** Push-Link auswerten: abspielen / weiter warten / Fallback / Zeitüberschreitung. */
+  _atEval() {
+    const a = this._at;
+    if (!a) return;
+    clearTimeout(this._atTimer);
+    const r = this._clips && this._clips.clips ? pickClip(this._clips.clips, a.at) : { state: "wait" };
+    if (r.state === "wait" && !(this._clips && this._clips.error) && Date.now() < a.deadline) {
+      this._render();
+      if (!document.hidden) this._atTimer = setTimeout(() => this._atPoll(), AT_POLL_MS);
+      return;
+    }
+    this._atDone();
+    if (r.clip) {
+      this._at = null;
+      this._clipNote = r.state === "fallback" ? "Kein eigener Clip zur Bewegung – nächstälterer Clip." : "";
+      this._play(r.clip.filename);
+    } else {
+      this._at = { ...a, state: "none" };
+      this._render();
+    }
+  }
+
+  async _atPoll() {
+    const a = this._at;
+    if (!a || a.state !== "wait" || !this._cam) return;
+    try {
+      this._clips = await this._hass.callWS({ type: `${DOMAIN}/clips/list`, camera_id: this._cam });
+    } catch (e) { /* nächster Versuch in 5 s */ }
+    if (this._at === a) this._atEval();
+  }
+
+  /** Warten beenden; at/clip aus URL entfernen, damit Neuladen nicht erneut wartet. */
+  _atDone() {
+    clearTimeout(this._atTimer);
+    if (this._at) this._at = { ...this._at, state: "none" };
+    this._params.delete("at"); this._params.delete("clip");
+    try {
+      const u = new URL(location.href);
+      u.searchParams.delete("at"); u.searchParams.delete("clip");
+      history.replaceState(history.state, "", u);
+    } catch (e) { /* egal */ }
+  }
+
+  _atStop() { this._atDone(); this._at = null; }
 
   async _play(filename) {
     try {
@@ -614,10 +696,18 @@ class KameraZentralePanel extends HTMLElement {
     if (!c) return `<p class="muted">Lade Aufnahmen …</p>`;
     if (c.error) return `<p class="err">${esc(c.error)}</p>`;
 
+    const a = this._at;
+    const atOverlay = !a ? "" : a.state === "wait" ? `<div class="player-modal" id="at-wait">
+      <button class="close-modal" data-at-cancel>✕</button>
+      <div class="spinner"></div>
+      <p class="clip-name">Clip wird verarbeitet …</p>
+      <p class="clip-name">Bewegung um ${esc(new Date(parseAt(a.at)).toLocaleTimeString("de-DE"))} Uhr – dauert meist 1–3 Minuten</p>
+      <button class="at-cancel" data-at-cancel>Abbrechen</button>
+    </div>` : `<p class="err">Kein passender Clip gefunden.</p>`;
     const player = this._clipSrc ? `<div class="player-modal" id="player-modal">
       <button class="close-modal" data-close-modal>✕</button>
       <video controls playsinline autoplay src="${esc(this._clipSrc)}"></video>
-      <p class="clip-name">${esc(this._clipName)}</p>
+      <p class="clip-name">${esc(this._clipName)}</p>${this._clipNote ? `<p class="clip-name">${esc(this._clipNote)}</p>` : ""}
     </div>` : "";
 
     const grouped = {};
@@ -633,7 +723,7 @@ class KameraZentralePanel extends HTMLElement {
         return `<div class="day-group"><h3>${day}</h3><ul class="clips-list">${clips}</ul></div>`;
       }).join("")
       : `<p class="muted">Keine Aufnahmen.</p>`;
-    return `${player}<div class="clips-container">${list}</div>`;
+    return `${atOverlay}${player}<div class="clips-container">${list}</div>`;
   }
 
   /** Ein Steuerelement je Entität nach Domain; Werte setzt _updateValues(). */
@@ -743,13 +833,13 @@ class KameraZentralePanel extends HTMLElement {
     const root = this.shadowRoot;
     const $ = (sel, fn) => root.querySelectorAll(sel).forEach(fn);
     $("[data-open]", (el) => el.addEventListener("click", () => { this._cam = el.dataset.open; this._tab = "live"; this._error = ""; this._render(); }));
-    $("[data-back]", (el) => el.addEventListener("click", () => { this._cam = null; this._clips = null; this._clipSrc = ""; this._error = ""; this._render(); }));
+    $("[data-back]", (el) => el.addEventListener("click", () => { this._atStop(); this._cam = null; this._clips = null; this._clipSrc = ""; this._clipNote = ""; this._error = ""; this._render(); }));
     $("[data-lens]", (el) => el.addEventListener("click", () => this._selectLens(this._camera(), Number(el.dataset.lens))));
     $("[data-links]", (el) => el.addEventListener("click", () => { this._page = "links"; this._error = ""; this._loadLinks(); }));
     $("[data-links-back]", (el) => el.addEventListener("click", () => { this._page = null; this._sheet = null; this._render(); }));
     this._linksBind(root);
     $("[data-tab]", (el) => el.addEventListener("click", () => {
-      this._tab = el.dataset.tab; this._error = "";
+      this._tab = el.dataset.tab; this._error = ""; this._atStop();
       if (this._tab === "aufnahmen") this._loadClips();
       else if (this._tab === "erkennung") this._loadDetection();
       else this._render();
@@ -757,7 +847,8 @@ class KameraZentralePanel extends HTMLElement {
     this._ptzBind(root);
     $("[data-det]", (el) => el.addEventListener("change", () => this._detSet(el)));
     $("[data-clip]", (el) => el.addEventListener("click", () => this._play(el.dataset.clip)));
-    $("[data-close-modal]", (el) => el.addEventListener("click", () => { this._clipSrc = ""; this._clipName = ""; this._render(); }));
+    $("[data-close-modal]", (el) => el.addEventListener("click", () => { this._clipSrc = ""; this._clipName = ""; this._clipNote = ""; this._render(); }));
+    $("[data-at-cancel]", (el) => el.addEventListener("click", () => { this._atStop(); this._render(); }));
     $("[data-act]", (el) => {
       const eid = el.dataset.e;
       const dom = eid.split(".")[0];
@@ -1139,6 +1230,9 @@ const STYLE = `
     border-radius: 16px;
     background: #000;
   }
+  .spinner { width: 40px; height: 40px; border: 4px solid rgba(255,255,255,.25); border-top-color: #fff; border-radius: 50%; animation: spin 1s linear infinite; margin-bottom: 16px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .at-cancel { margin-top: 20px; min-height: 44px; padding: 0 24px; border: 0; border-radius: 22px; background: rgba(255,255,255,.2); color: #fff; font-size: 1em; cursor: pointer; }
   .clip-name {
     color: rgba(255, 255, 255, 0.8);
     font-size: 0.8125em;
