@@ -1,7 +1,9 @@
-"""WebSocket-API (nur Lesen; Schreiben läuft über normale HA-Dienste).
+"""WebSocket-API (Lesen; Schreiben nur bei detection/set, Rest über HA-Dienste).
 
   kamera_zentrale/cameras/list
   kamera_zentrale/clips/list {camera_id}
+  kamera_zentrale/detection/get {camera_id}
+  kamera_zentrale/detection/set {camera_id, action, type, enable}  (nur Admin; schreibt an die Kamera)
 """
 from __future__ import annotations
 
@@ -14,7 +16,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from . import cameras, clips
+from . import cameras, clips, detection
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -24,6 +26,8 @@ _LOGGER = logging.getLogger(__name__)
 def async_register(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_cameras_list)
     websocket_api.async_register_command(hass, ws_clips_list)
+    websocket_api.async_register_command(hass, ws_detection_get)
+    websocket_api.async_register_command(hass, ws_detection_set)
 
 
 @websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/cameras/list"})
@@ -49,3 +53,30 @@ async def ws_clips_list(hass, connection, msg):
         connection.send_error(msg["id"], "unavailable", f"Clip-Ablage nicht erreichbar: {err}")
         return
     connection.send_result(msg["id"], {"folder": folder, "clips": found})
+
+
+@websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/detection/get", vol.Required("camera_id"): str})
+@websocket_api.async_response
+async def ws_detection_get(hass, connection, msg):
+    try:
+        connection.send_result(msg["id"], await detection.async_get(hass, msg["camera_id"]))
+    except detection.DetectionError as err:
+        connection.send_error(msg["id"], err.code, err.message)
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command({
+    vol.Required("type"): f"{DOMAIN}/detection/set",
+    vol.Required("camera_id"): str,
+    vol.Required("action"): vol.In([*detection.ACTIONS, "tracking"]),
+    vol.Required("detect_type"): vol.In(detection.TYPES),
+    vol.Required("enable"): bool,
+})
+@websocket_api.async_response
+async def ws_detection_set(hass, connection, msg):
+    try:
+        res = await detection.async_set(hass, msg["camera_id"], msg["action"], msg["detect_type"], msg["enable"])
+    except detection.DetectionError as err:
+        connection.send_error(msg["id"], err.code, err.message)
+        return
+    connection.send_result(msg["id"], res)
