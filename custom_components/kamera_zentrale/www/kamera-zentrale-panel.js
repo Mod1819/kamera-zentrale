@@ -1,4 +1,4 @@
-/* Kamera-Zentrale – Panel v0.4.0 (iOS/macOS Design)
+/* Kamera-Zentrale – Panel v0.4.1 (iOS/macOS Design)
  * Daten: WebSocket kamera_zentrale/cameras/list + clips/list + detection/get|set + links/*, Werte live aus hass.states,
  * Schreiben über normale HA-Dienste (hass.callService); Erkennungs-Matrix über detection/set (Admin).
  */
@@ -15,7 +15,7 @@ const DETECTION_TYPES = ["motion", "person", "vehicle", "animal", "pet", "visito
 
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmtTime = (iso) => new Date(iso).toLocaleString("de-DE", { dateStyle: "medium", timeStyle: "medium" });
-const fmtDate = (iso) => { const d = new Date(iso); const now = new Date(); const diff = Math.floor((now - d) / 86400000); if (diff === 0) return "Heute"; if (diff === 1) return "Gestern"; return d.toLocaleDateString("de-DE"); };
+const fmtDate = (iso) => { const d = new Date(iso); const t = new Date(); const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime(); const diff = Math.round((day(t) - day(d)) / 86400000); if (diff === 0) return "Heute"; if (diff === 1) return "Gestern"; return d.toLocaleDateString("de-DE", { weekday: "short", day: "2-digit", month: "2-digit", year: "numeric" }); };
 
 /** PTZ-Entitäten einer Kamera erkennen (reine Funktion). `entities` = flache Liste {entity_id, domain, translation_key}.
  *  Gibt null zurück, wenn nichts Steuerbares da ist. */
@@ -162,6 +162,7 @@ class KameraZentralePanel extends HTMLElement {
   _camera() { return (this._cameras || []).find((c) => c.id === this._cam); }
   _state(eid) { return this._hass.states[eid]; }
   _lenses(cam) { return lensesOf(cam.groups.flatMap((g) => g.entities)); }
+  _sortOldest() { try { return localStorage.getItem("kz_sort") === "old"; } catch (e) { return false; } }
   _lensGet(id) { try { return Number(localStorage.getItem(`kz_lens_${id}`)); } catch (e) { return NaN; } }
   _lensSet(id, i) { try { localStorage.setItem(`kz_lens_${id}`, String(i)); } catch (e) { /* egal */ } }
   /** Anzuzeigende Kamera-Entität: Live = gemerktes Objektiv, Übersicht (overview) = Weitwinkel (Index 0). */
@@ -222,9 +223,9 @@ class KameraZentralePanel extends HTMLElement {
       return;
     }
     this._atDone();
-    if (r.clip) {
+    if (r.clip && r.state === "play") {
       this._at = null;
-      this._clipNote = r.state === "fallback" ? "Kein eigener Clip zur Bewegung – nächstälterer Clip." : "";
+      this._clipNote = "";
       this._play(r.clip.filename);
     } else {
       this._at = { ...a, state: "none" };
@@ -703,27 +704,31 @@ class KameraZentralePanel extends HTMLElement {
       <p class="clip-name">Clip wird verarbeitet …</p>
       <p class="clip-name">Bewegung um ${esc(new Date(parseAt(a.at)).toLocaleTimeString("de-DE"))} Uhr – dauert meist 1–3 Minuten</p>
       <button class="at-cancel" data-at-cancel>Abbrechen</button>
-    </div>` : `<p class="err">Kein passender Clip gefunden.</p>`;
+    </div>` : `<p class="err">Zur Bewegung um ${esc(new Date(parseAt(a.at)).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" }))} Uhr gibt es kein Video. Die Kamera speichert nur die Typen, die unter Erkennung → FTP eingeschaltet sind.</p>`;
     const player = this._clipSrc ? `<div class="player-modal" id="player-modal">
       <button class="close-modal" data-close-modal>✕</button>
       <video controls playsinline autoplay src="${esc(this._clipSrc)}"></video>
       <p class="clip-name">${esc(this._clipName)}</p>${this._clipNote ? `<p class="clip-name">${esc(this._clipNote)}</p>` : ""}
     </div>` : "";
 
+    const oldest = this._sortOldest();
+    const sorted = [...c.clips].sort((x, y) => (x.time < y.time ? 1 : x.time > y.time ? -1 : 0));
+    if (oldest) sorted.reverse();
     const grouped = {};
-    c.clips.forEach((x) => {
+    sorted.forEach((x) => {
       const day = fmtDate(x.time);
       if (!grouped[day]) grouped[day] = [];
       grouped[day].push(x);
     });
-    const days = Object.keys(grouped).reverse();
+    const days = Object.keys(grouped);
+    const sortBar = c.clips.length ? `<div class="seg sort-seg"><button class="${oldest ? "" : "act"}" data-sort="new">Neueste zuerst</button><button class="${oldest ? "act" : ""}" data-sort="old">Älteste zuerst</button></div>` : "";
     const list = c.clips.length
       ? days.map((day) => {
         const clips = grouped[day].map((x) => `<li class="${x.filename === this._clipName ? "act" : ""}" data-clip="${esc(x.filename)}"><span class="time">${esc(fmtTime(x.time).split(" ")[1])}</span><span class="file">${esc(x.filename)}</span></li>`).join("");
         return `<div class="day-group"><h3>${day}</h3><ul class="clips-list">${clips}</ul></div>`;
       }).join("")
       : `<p class="muted">Keine Aufnahmen.</p>`;
-    return `${atOverlay}${player}<div class="clips-container">${list}</div>`;
+    return `${atOverlay}${player}${sortBar}<div class="clips-container">${list}</div>`;
   }
 
   /** Ein Steuerelement je Entität nach Domain; Werte setzt _updateValues(). */
@@ -847,6 +852,7 @@ class KameraZentralePanel extends HTMLElement {
     this._ptzBind(root);
     $("[data-det]", (el) => el.addEventListener("change", () => this._detSet(el)));
     $("[data-clip]", (el) => el.addEventListener("click", () => this._play(el.dataset.clip)));
+    $("[data-sort]", (el) => el.addEventListener("click", () => { try { localStorage.setItem("kz_sort", el.dataset.sort); } catch (e) { /* egal */ } this._render(); }));
     $("[data-close-modal]", (el) => el.addEventListener("click", () => { this._clipSrc = ""; this._clipName = ""; this._clipNote = ""; this._render(); }));
     $("[data-at-cancel]", (el) => el.addEventListener("click", () => { this._atStop(); this._render(); }));
     $("[data-act]", (el) => {

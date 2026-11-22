@@ -6,6 +6,11 @@ Sie baut keine eigene Kameraverbindung auf, sondern nutzt die Entitäten der off
 
 ## Funktionen
 
+### v0.4.1
+- „Heute/Gestern“ nach Kalendertag statt 24-h-Fenster
+- Aufnahmen: Sortierung umschaltbar (Neueste/Älteste zuerst), Tage und Clips einheitlich sortiert
+- Push-Link ohne eigenen Clip: klarer Hinweis statt Ersatz-Clip
+
 ### v0.4.0 (Aktuell: Push-Link öffnet den passenden Clip)
 - Link `/kameras?camera=<device_id>&at=<YYYYMMDDHHMMSS>` (lokale Zeit der Bewegung) öffnet Aufnahmen und spielt den Clip mit Start in [at−90 s, at+30 s] (bei mehreren der zeitlich nächste) sofort ab.
 - Clip noch nicht da (Push kommt ~3 s nach der Bewegung, Clip erst 1–3 min später): Overlay „Clip wird verarbeitet …“, Liste wird alle 5 s neu geladen, Wiedergabe startet automatisch. Abbrechen möglich; nach 6 min „Kein passender Clip gefunden“. Polling pausiert bei verstecktem Tab.

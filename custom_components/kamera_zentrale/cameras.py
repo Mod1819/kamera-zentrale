@@ -72,7 +72,7 @@ def async_collect(hass: HomeAssistant) -> list[dict[str, Any]]:
     entry_ids = {e.entry_id for e in hass.config_entries.async_entries(REOLINK_DOMAIN)}
     devices, entities = [], []
     for dev in dev_reg.devices.values():
-        if not entry_ids.intersection(dev.config_entries):
+        if not entry_ids.intersection(({getattr(dev, 'config_entry_id', None)} - {None}) or set(dev.config_entries)):
             continue
         devices.append({
             "id": dev.id, "name": dev.name_by_user or dev.name or dev.id,

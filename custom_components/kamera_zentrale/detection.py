@@ -84,7 +84,7 @@ def channel_of(identifiers: set[tuple[str, str]]) -> int:
 # ---------- Kamera-Zugriff ----------
 
 def _api(hass: HomeAssistant, device: dr.DeviceEntry):
-    for entry_id in device.config_entries:
+    for entry_id in (({getattr(device, 'config_entry_id', None)} - {None}) or set(device.config_entries)):
         entry = hass.config_entries.async_get_entry(entry_id)
         if entry is None or entry.domain != REOLINK_DOMAIN:
             continue
