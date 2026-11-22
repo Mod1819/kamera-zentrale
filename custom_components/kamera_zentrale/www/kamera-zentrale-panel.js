@@ -633,6 +633,13 @@ class KameraZentralePanel extends HTMLElement {
     return `<label class="toggle-wrap"><input type="checkbox" class="toggle" data-det="${key}"${checked ? " checked" : ""}><div class="toggle-track"></div></label>`;
   }
 
+  /** Info-Zeile zum Clip-Auslöser-Sensor (folgt der FTP-Spalte). */
+  _triggerHint() {
+    const cam = (this._cameras || []).find((c) => c.id === this._cam);
+    const ent = cam && cam.groups.flatMap((g) => g.entities).find((e) => e.translation_key === "clip_trigger");
+    return ent ? `<p class="hint">Push/Automationen: <code>${esc(ent.entity_id)}</code> folgt automatisch der FTP-Spalte.</p>` : "";
+  }
+
   _detectionHtml() {
     const d = this._det && this._det.cam === this._cam ? this._det : null;
     if (!d) return `<div class="section"><h3>Erkennen &amp; Reagieren</h3><p class="muted">Lade …</p></div>`;
@@ -649,7 +656,7 @@ class KameraZentralePanel extends HTMLElement {
       const lists = types.map((t) => `<h3>${icon(t)} ${DET_TYPES[t][0]}</h3><div class="ctrls">` +
         acts.filter((a) => t in actions[a]).map((a) => `<div class="ctrl"><label>${DET_ACTIONS[a]}</label><div class="in">${this._detToggle(`${a}:${t}`, actions[a][t])}</div></div>`).join("") + `</div>`).join("");
       html += `<div class="section"><h3>Erkennen &amp; Reagieren</h3><div class="det-desktop ctrls">${table}</div><div class="det-mobile">${lists}</div>` +
-        `<p class="hint">Einschalten aktiviert rund um die Uhr; Zeitpläne aus der App werden überschrieben.</p></div>`;
+        `<p class="hint">Einschalten aktiviert rund um die Uhr; Zeitpläne aus der App werden überschrieben.</p>${this._triggerHint()}</div>`;
     }
     if (tracking && Object.keys(tracking).length) {
       html += `<div class="section"><h3>Verfolgen (Tracking)</h3><div class="ctrls">` +

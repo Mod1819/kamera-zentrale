@@ -19,7 +19,7 @@ GROUPS: tuple[str, ...] = ("live", "licht", "erkennung", "aufnahme", "ptz", "aud
 # Schlüsselwörter (Teilstring-Treffer auf translation_key bzw. entity_id-Objektname).
 KEYWORDS: dict[str, tuple[str, ...]] = {
     "licht": ("ir_lights", "floodlight", "spotlight", "status_led"),
-    "erkennung": ("sensitivity", "ai_", "delay", "motion", "person", "vehicle", "pet", "animal", "visitor"),
+    "erkennung": ("clip_trigger", "sensitivity", "ai_", "delay", "motion", "person", "vehicle", "pet", "animal", "visitor"),
     "aufnahme": ("record", "ftp", "push", "email"),
     "ptz": ("ptz", "auto_track", "preset", "zoom", "focus", "guard", "pan", "tilt"),
     "audio": ("siren", "volume", "audio", "alarm"),

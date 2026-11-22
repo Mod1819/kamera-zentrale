@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
@@ -9,6 +10,7 @@ from homeassistant.helpers.typing import ConfigType
 from . import clips, links, panel, websocket
 from .const import DOMAIN
 
+PLATFORMS = [Platform.BINARY_SENSOR]
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
@@ -30,11 +32,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     mgr = links.LinkManager(hass)
     await mgr.async_load()
     hass.data.setdefault(DOMAIN, {})["links"] = mgr
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     panel.async_remove_panel(hass)
+    ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if mgr := hass.data.get(DOMAIN, {}).pop("links", None):
         mgr.async_unload()
-    return True
+    return ok

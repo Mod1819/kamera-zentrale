@@ -4,7 +4,9 @@
       "user": {
         "title": "Camera Center",
         "description": "Shows all Reolink cameras from Home Assistant in one panel. Clips are stored on the FTP storage (nginx directory listing).",
-        "data": { "clip_base_url": "Clip storage base URL" }
+        "data": {
+          "clip_base_url": "Clip storage base URL"
+        }
       }
     },
     "abort": {
@@ -15,7 +17,16 @@
     "step": {
       "init": {
         "title": "Camera Center",
-        "data": { "clip_base_url": "Clip storage base URL" }
+        "data": {
+          "clip_base_url": "Clip storage base URL"
+        }
+      }
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "clip_trigger": {
+        "name": "Clip trigger"
       }
     }
   }

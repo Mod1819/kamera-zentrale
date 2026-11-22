@@ -11,8 +11,9 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 
-from .const import REOLINK_DOMAIN
+from .const import REOLINK_DOMAIN, SIGNAL_MATRIX
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -136,4 +137,6 @@ async def async_set(hass: HomeAssistant, camera_id: str, action: str, type_: str
         param = {key: {"schedule": {"channel": ch, "table": {TYPE_KEYS[type_]: build_table(enable)}}}}
     if await _send(api, cmd, param) is None:
         raise DetectionError("camera_error", f"{cmd} von der Kamera abgelehnt")
-    return await _read(api, ch)
+    matrix = await _read(api, ch)
+    async_dispatcher_send(hass, SIGNAL_MATRIX, camera_id, matrix)
+    return matrix

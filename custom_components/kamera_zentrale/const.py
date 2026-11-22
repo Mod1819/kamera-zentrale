@@ -9,3 +9,5 @@ REOLINK_DOMAIN: Final = "reolink"
 
 CONF_CLIP_BASE_URL: Final = "clip_base_url"
 DEFAULT_CLIP_BASE_URL: Final = "http://192.168.0.251:8080"
+
+SIGNAL_MATRIX: Final = f"{DOMAIN}_matrix_updated"  # (camera_id, matrix) nach erfolgreichem detection/set
