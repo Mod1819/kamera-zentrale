@@ -86,6 +86,16 @@ const LINK_SUGGESTION = {
   target_entities: ["light.garten_scheinwerfer"], mode: "follow", hold_seconds: 0, only_dark: false, enabled: true,
 };
 
+const GROUP_SUGGESTION = {
+  kind: "group", name: "Garten-Licht-Verbund", members: ["light.garten_light", "light.garten_scheinwerfer"],
+  followers: [], triggers: [], hold_seconds: 0, only_dark: false, enabled: true,
+};
+const OLD_LINK_NAME = "Ring Garten-Licht → TrackMix-Scheinwerfer";
+const GROUP_KEYS = { members: ["light", "switch"], followers: ["light", "switch", "siren"], triggers: ["binary_sensor", "event"] };
+const GROUP_TITLES = { members: "Mitglieder (schalten sich gegenseitig)", followers: "Zusatzgeräte (laufen nur mit)", triggers: "Zusätzliche Auslöser (optional)" };
+// Vorschläge für Auslöser: Clip-Auslöser/Person-Sensoren der Kameras, Ring-Bewegung
+const TRIG_HINT = /clip_ausloser|clip_trigger|person|ring.*(motion|bewegung)|(motion|bewegung).*ring/;
+
 class KameraZentralePanel extends HTMLElement {
   constructor() {
     super();
@@ -482,16 +492,32 @@ class KameraZentralePanel extends HTMLElement {
     const L = this._links;
     const admin = this._isAdmin();
     const head = `<div class="head"><button class="back-btn" data-links-back>‹ Kameras</button><div class="head-title"><h1>Verbund</h1>
-      <p class="subhead">Geräte miteinander koppeln</p></div>${admin ? `<button class="btn-pill" data-rule-new>+ Neue Kopplung</button>` : ""}</div>`;
+      <p class="subhead">Geräte miteinander koppeln</p></div>${admin ? `<button class="btn-pill" data-rule-new>+ Neu</button>` : ""}</div>`;
     if (!L) return `${head}<p class="muted">Lade Kopplungen …</p>`;
     if (L.error) return `${head}<p class="err">${esc(L.error)}</p>`;
-    const S = LINK_SUGGESTION;
+    const S = LINK_SUGGESTION, S2 = GROUP_SUGGESTION;
     const st = this._hass.states;
     const sug = admin && st[S.trigger_entity] && st[S.target_entities[0]]
       && !L.rules.some((r) => r.trigger_entity === S.trigger_entity && r.target_entities.includes(S.target_entities[0]))
       ? `<div class="section"><h3>Vorschlag</h3><div class="ctrls"><div class="ctrl"><label>${esc(S.name)}</label>
         <div class="in"><button class="btn-pill" data-rule-sug>Anlegen</button></div></div></div></div>` : "";
+    const gsug = admin && S2.members.every((e) => st[e]) && !L.rules.some((r) => r.kind === "group" && S2.members.every((e) => r.members.includes(e)))
+      ? `<div class="section"><h3>Vorschlag</h3><div class="ctrls"><div class="ctrl"><label>${esc(S2.name)}</label>
+        <div class="in"><button class="btn-pill" data-group-sug>Anlegen</button></div></div></div></div>` : "";
+    const chooser = this._choose ? `<div class="backdrop" data-choose-cancel></div><div class="sheet" role="dialog" aria-label="Neu">
+      <h2>Neu anlegen</h2><div class="sheet-btns"><button class="btn-pill" data-new-kind="link">Kopplung (Wenn → Dann)</button>
+      <button class="btn-pill" data-new-kind="group">Licht-Verbund</button></div></div>` : "";
     const rows = L.rules.map((r) => {
+      if (r.kind === "group") {
+        const names = (l) => l.map((t) => this._fname(t)).join(", ");
+        const info = `Nachlauf ${r.hold_seconds} s${r.only_dark ? " · nur bei Dunkelheit" : ""}${r.triggers.length ? ` · Auslöser: ${names(r.triggers)}` : ""}`;
+        return `<div class="ctrl rule"><label><b>${esc(r.name)}${r.active ? ` <span class="dot on" title="aktiv"></span> <small>aktiv</small>` : ""}</b>
+          <span class="muted rule-sub">Verbund: ${esc(r.members.map((t) => this._fname(t)).join(" ⇄ "))}${r.followers.length ? ` (+ ${esc(names(r.followers))})` : ""}</span>
+          <span class="hint">${esc(info)}</span></label><div class="in">
+          <label class="toggle-wrap"><input type="checkbox" class="toggle" data-rule-en="${esc(r.id)}"${r.enabled ? " checked" : ""}${admin ? "" : " disabled"}><div class="toggle-track"></div></label>
+          ${admin ? `<button class="icon-btn" data-rule-edit="${esc(r.id)}" aria-label="Bearbeiten"><ha-icon icon="mdi:pencil"></ha-icon></button>
+          <button class="icon-btn" data-rule-del="${esc(r.id)}" aria-label="Löschen"><ha-icon icon="mdi:delete"></ha-icon></button>` : ""}</div></div>`;
+      }
       const info = `${r.mode === "pulse" ? "Impuls" : "Mitlaufen"} · Nachlauf ${r.hold_seconds} s${r.only_dark ? " · nur bei Dunkelheit" : ""}`;
       return `<div class="ctrl rule"><label><b>${esc(r.name)}</b><span class="muted rule-sub">Wenn ${esc(this._fname(r.trigger_entity))} → ${esc(r.target_entities.map((t) => this._fname(t)).join(", "))}</span>
         <span class="hint">${esc(info)}</span></label><div class="in">
@@ -500,7 +526,7 @@ class KameraZentralePanel extends HTMLElement {
         <button class="icon-btn" data-rule-del="${esc(r.id)}" aria-label="Löschen"><ha-icon icon="mdi:delete"></ha-icon></button>` : ""}</div></div>`;
     }).join("");
     const list = L.rules.length ? `<div class="ctrls">${rows}</div>` : `<p class="muted">Noch keine Kopplungen.</p>`;
-    return `${head}${sug}${list}${this._sheet ? this._sheetHtml() : ""}`;
+    return `${head}${sug}${gsug}${list}${chooser}${this._sheet ? (this._sheet.kind === "group" ? this._groupSheetHtml() : this._sheetHtml()) : ""}`;
   }
 
   /** Auswahlzeilen für Auslöser (kind="trig") oder Ziele (kind="tgt"), gefiltert nach Suchtext. */
@@ -546,7 +572,47 @@ class KameraZentralePanel extends HTMLElement {
     </div>`;
   }
 
-  _sheetOpen(rule) {
+  /** Auswahlzeilen für Verbund-Listen (key = members|followers|triggers), gefiltert nach Suchtext. */
+  _gPickRows(key, q) {
+    q = q.trim().toLowerCase();
+    const d = this._sheet;
+    const reo = new Set((this._cameras || []).flatMap((c) => c.groups.flatMap((g) => g.entities)).filter((e) => e.domain === "light").map((e) => e.entity_id));
+    const hot = (e) => (key === "members" ? reo.has(e) || /^light\.(garten|ring)/.test(e) : key === "triggers" ? TRIG_HINT.test(e) : false);
+    let ids = this._entIds(GROUP_KEYS[key]).filter((e) => !(key !== "members" && d.members.includes(e)) || d[key].includes(e));
+    if (q) ids = ids.filter((e) => this._fname(e).toLowerCase().includes(q) || e.includes(q));
+    else if (key !== "followers") ids = ids.filter((e) => hot(e) || d[key].includes(e));
+    ids.sort((a, b) => (d[key].includes(b) - d[key].includes(a)) || (hot(b) - hot(a)) || this._fname(a).localeCompare(this._fname(b)));
+    ids = ids.slice(0, 30);
+    if (!ids.length) return `<p class="muted pick-empty">${q ? "Nichts gefunden." : "Keine Vorschläge – oben suchen."}</p>`;
+    return ids.map((e) => `<div class="pick-row" data-gpick="${key}" data-eid="${esc(e)}"><span>${esc(this._fname(e))}<small>${esc(e)}</small></span><span class="chk">${d[key].includes(e) ? "✓" : ""}</span></div>`).join("");
+  }
+
+  _groupSheetHtml() {
+    const d = this._sheet;
+    const q = this._sheetQ || {};
+    const sec = (key) => `<h3>${GROUP_TITLES[key]}</h3>
+      ${d[key].length ? `<div class="chips">${d[key].map((t) => `<button class="chip" data-gun="${key}" data-eid="${esc(t)}">${esc(this._fname(t))} ✕</button>`).join("")}</div>` : ""}
+      <input type="search" class="txt" placeholder="Suchen …" data-sh="q-${key}" value="${esc(q[key] || "")}">
+      <div class="pick" id="sh-list-${key}">${this._gPickRows(key, q[key] || "")}</div>`;
+    return `<div class="backdrop" data-sh-cancel></div><div class="sheet" role="dialog" aria-label="Licht-Verbund">
+      <h2>${d.id ? "Licht-Verbund bearbeiten" : "Neuer Licht-Verbund"}</h2>
+      <label class="fld">Name<input type="text" class="txt" data-sh="name" maxlength="60" value="${esc(d.name)}"></label>
+      ${sec("members")}${sec("followers")}${sec("triggers")}
+      <h3>Verhalten</h3>
+      <div class="ctrls"><div class="ctrl"><label>Nachlaufzeit</label><div class="in"><input type="range" class="slider" min="0" max="600" step="5" value="${d.hold_seconds}" data-sh="hold"><span class="val" id="sh-hold-val">${d.hold_seconds} s</span></div></div>
+      <div class="ctrl"><label>Nur bei Dunkelheit</label><div class="in"><label class="toggle-wrap"><input type="checkbox" class="toggle" data-sh="dark"${d.only_dark ? " checked" : ""}><div class="toggle-track"></div></label></div></div></div>
+      <div class="sheet-btns">${d.id ? `<button class="btn-pill ghost" data-sh-test>Testen</button>` : ""}<span class="grow"></span>
+        <button class="btn-pill ghost" data-sh-cancel>Abbrechen</button><button class="btn-pill" data-sh-save>Speichern</button></div>
+    </div>`;
+  }
+
+  _sheetOpen(rule, kind = "link") {
+    if (kind === "group" || (rule && rule.kind === "group")) {
+      this._sheet = rule ? { ...rule, members: [...rule.members], followers: [...rule.followers], triggers: [...rule.triggers] }
+        : { kind: "group", name: "", members: [], followers: [], triggers: [], hold_seconds: 0, only_dark: false, enabled: true };
+      this._sheetQ = { members: "", followers: "", triggers: "" };
+      return this._linksRender();
+    }
     this._sheet = rule ? { ...rule, target_entities: [...rule.target_entities] }
       : { name: "", trigger_entity: "", target_entities: [], mode: "follow", hold_seconds: 0, only_dark: false, enabled: true };
     this._sheetQ = { trig: "", tgt: "" };
@@ -557,6 +623,14 @@ class KameraZentralePanel extends HTMLElement {
     const d = this._sheet;
     const name = d.name.trim();
     if (!name) return this._toast("Bitte einen Namen eingeben.");
+    if (d.kind === "group") {
+      if (!(d.members.length >= 2 || (d.members.length && d.triggers.length))) return this._toast("Mindestens 2 Mitglieder (oder 1 Mitglied + 1 Auslöser) wählen.");
+      const g = { kind: "group", name, enabled: d.enabled, members: d.members, followers: d.followers, triggers: d.triggers,
+        hold_seconds: Math.round(d.hold_seconds), only_dark: d.only_dark };
+      if (d.id) g.id = d.id;
+      if (await this._linkCall("save", { rule: g })) { this._sheet = null; this._loadLinks(false); }
+      return;
+    }
     if (!d.trigger_entity) return this._toast("Bitte einen Auslöser wählen.");
     if (!d.target_entities.length) return this._toast("Bitte mindestens ein Ziel wählen.");
     const rule = { name, enabled: d.enabled, trigger_entity: d.trigger_entity, target_entities: d.target_entities,
@@ -567,7 +641,18 @@ class KameraZentralePanel extends HTMLElement {
 
   _linksBind(root) {
     const $ = (sel, fn) => root.querySelectorAll(sel).forEach(fn);
-    $("[data-rule-new]", (el) => el.addEventListener("click", () => this._sheetOpen(null)));
+    $("[data-rule-new]", (el) => el.addEventListener("click", () => { this._choose = true; this._linksRender(); }));
+    $("[data-choose-cancel]", (el) => el.addEventListener("click", () => { this._choose = false; this._linksRender(); }));
+    $("[data-new-kind]", (el) => el.addEventListener("click", () => { this._choose = false; this._sheetOpen(null, el.dataset.newKind); }));
+    $("[data-group-sug]", async (el) => el.addEventListener("click", async () => {
+      if (!(await this._linkCall("save", { rule: GROUP_SUGGESTION }))) return;
+      const old = this._links.rules.find((r) => r.kind !== "group" && r.enabled && r.name === OLD_LINK_NAME);
+      if (old && confirm(`Die Kopplung „${old.name}“ ist jetzt überflüssig. Deaktivieren?`)) {
+        const { id, name, trigger_entity, target_entities, mode, hold_seconds, only_dark } = old;
+        await this._linkCall("save", { rule: { id, name, trigger_entity, target_entities, mode, hold_seconds, only_dark, enabled: false } });
+      }
+      this._loadLinks(false);
+    }));
     $("[data-rule-edit]", (el) => el.addEventListener("click", () => this._sheetOpen(this._links.rules.find((r) => r.id === el.dataset.ruleEdit))));
     $("[data-rule-del]", (el) => el.addEventListener("click", async () => {
       const r = this._links.rules.find((x) => x.id === el.dataset.ruleDel);
@@ -576,8 +661,8 @@ class KameraZentralePanel extends HTMLElement {
     $("[data-rule-en]", (el) => el.addEventListener("change", async () => {
       const r = this._links.rules.find((x) => x.id === el.dataset.ruleEn);
       if (!r) return;
-      const { id, name, trigger_entity, target_entities, mode, hold_seconds, only_dark } = r;
-      const ok = await this._linkCall("save", { rule: { id, name, trigger_entity, target_entities, mode, hold_seconds, only_dark, enabled: el.checked } });
+      const { active, ...rest } = r; // active ist nur Anzeige
+      const ok = await this._linkCall("save", { rule: { ...rest, enabled: el.checked } });
       if (ok) this._loadLinks(false); else el.checked = !el.checked;
     }));
     $("[data-rule-sug]", (el) => el.addEventListener("click", async () => {
@@ -587,15 +672,17 @@ class KameraZentralePanel extends HTMLElement {
     if (!d) return;
     const val = (k) => root.querySelector(`[data-sh="${k}"]`);
     val("name").addEventListener("input", (ev) => { d.name = ev.target.value; });
-    ["trig", "tgt"].forEach((k) => val(`q-${k}`).addEventListener("input", (ev) => {
+    const grp = d.kind === "group";
+    (grp ? Object.keys(GROUP_KEYS) : ["trig", "tgt"]).forEach((k) => val(`q-${k}`).addEventListener("input", (ev) => {
       this._sheetQ[k] = ev.target.value;
-      root.getElementById(`sh-list-${k}`).innerHTML = this._pickRows(k, ev.target.value);
+      root.getElementById(`sh-list-${k}`).innerHTML = grp ? this._gPickRows(k, ev.target.value) : this._pickRows(k, ev.target.value);
     }));
     val("hold").addEventListener("input", (ev) => { d.hold_seconds = Number(ev.target.value); root.getElementById("sh-hold-val").textContent = `${ev.target.value} s`; });
     val("dark").addEventListener("change", (ev) => { d.only_dark = ev.target.checked; });
     $("[data-sh-cancel]", (el) => el.addEventListener("click", () => { this._sheet = null; this._linksRender(); }));
     $("[data-sh-save]", (el) => el.addEventListener("click", () => this._sheetSave()));
     $("[data-sh-test]", (el) => el.addEventListener("click", () => this._linkCall("test", { rule_id: d.id }, "Test läuft: Ziele 10 s an.")));
+    $("[data-gun]", (el) => el.addEventListener("click", () => { d[el.dataset.gun] = d[el.dataset.gun].filter((t) => t !== el.dataset.eid); this._linksRender(); }));
     $("[data-mode]", (el) => el.addEventListener("click", () => {
       d.mode = el.dataset.mode;
       if (d.mode === "pulse" && d.hold_seconds < 10) d.hold_seconds = 10;
@@ -604,6 +691,13 @@ class KameraZentralePanel extends HTMLElement {
     $("[data-untgt]", (el) => el.addEventListener("click", () => { d.target_entities = d.target_entities.filter((t) => t !== el.dataset.untgt); this._linksRender(); }));
     // Auswahlzeilen ändern sich beim Tippen -> Delegation auf dem Sheet
     root.querySelector(".sheet").addEventListener("click", (ev) => {
+      const gp = ev.target.closest("[data-gpick]");
+      if (gp) {  // Mehrfachauswahl; eine Entität nur in einer Liste -> aus den anderen entfernen
+        const k = gp.dataset.gpick, e = gp.dataset.eid;
+        if (d[k].includes(e)) d[k] = d[k].filter((x) => x !== e);
+        else { Object.keys(GROUP_KEYS).forEach((o) => { d[o] = d[o].filter((x) => x !== e); }); d[k] = [...d[k], e]; }
+        return this._linksRender();
+      }
       const t = ev.target.closest("[data-pick-trig]");
       const g = ev.target.closest("[data-pick-tgt]");
       if (t) { d.trigger_entity = t.dataset.pickTrig; this._sheetQ.trig = ""; this._linksRender(); }

@@ -252,3 +252,173 @@ async def test_ws_test_turns_on_for_10s(hass, hass_ws_client, calls):
     await tick(hass, 11)
     assert ids(off) == [[TGT]]
     assert (await call(ws, 3, "test", rule_id="nix"))["error"]["code"] == "not_found"
+
+
+# ---------- Licht-Verbund (kind=group) ----------
+
+A, B, X, SENS = "light.garten_light", "light.garten_scheinwerfer", "switch.zusatz", "binary_sensor.bewegung"
+
+
+def grp(**kw):
+    return {"kind": "group", "name": "V", "members": [A, B], "followers": [X], "triggers": [],
+            "hold_seconds": 0, "only_dark": False, "enabled": True, **kw}
+
+
+@pytest.fixture
+def g(hass, calls):
+    for e in (X, SENS):
+        hass.states.async_set(e, "off")
+
+
+async def own(hass, call_list, eid, state):
+    """Zustand so melden, wie HA es nach unserem Dienstaufruf tut (gleicher Context)."""
+    hass.states.async_set(eid, state, context=call_list[-1].context)
+    await hass.async_block_till_done()
+
+
+async def test_group_mutual_and_followers(hass, mgr, calls, g):
+    on, off = calls
+    await mgr.async_save(grp())
+    await set_state(hass, A, "on")
+    assert sorted(ids(on)[0]) == [B, X]
+    for e in (B, X):
+        await own(hass, on, e, "on")
+    assert len(on) == 1 and not off  # keine Schleife
+    await set_state(hass, A, "off")
+    assert sorted(ids(off)[0]) == [B, X]
+    for e in (B, X):
+        await own(hass, off, e, "off")
+    assert len(on) == 1 and len(off) == 1
+
+
+async def test_group_reverse_direction(hass, mgr, calls, g):
+    on, off = calls
+    await mgr.async_save(grp())
+    await set_state(hass, B, "on")
+    assert sorted(ids(on)[0]) == [A, X]
+    await set_state(hass, B, "off")
+    assert sorted(ids(off)[0]) == [A, X]
+
+
+async def test_group_preexisting_member_not_switched_off(hass, mgr, calls, g):
+    on, off = calls
+    await set_state(hass, B, "on")
+    await mgr.async_save(grp())
+    await set_state(hass, A, "on")
+    assert sorted(ids(on)[0]) == [X]  # B war schon an
+    await set_state(hass, A, "off")
+    assert ids(off) == []  # B ist noch Initiator (nicht von uns an)
+    await set_state(hass, B, "off")
+    assert sorted(ids(off)[0]) == [X]
+    assert B not in ids(off)[0]
+
+
+async def test_group_hold_and_cancel(hass, mgr, calls, g):
+    on, off = calls
+    await mgr.async_save(grp(hold_seconds=30))
+    await set_state(hass, A, "on")
+    await set_state(hass, A, "off")
+    await tick(hass, 20)
+    assert not off
+    await set_state(hass, A, "on")  # Abbruch
+    await set_state(hass, A, "off")
+    await tick(hass, 25)
+    assert not off  # Timer wurde neu gestartet
+    await tick(hass, 31)  # tick ist absolut ab jetzt
+    assert sorted(ids(off)[0]) == [B, X]
+
+
+async def test_group_trigger_sensor_alone(hass, mgr, calls, g):
+    on, off = calls
+    await mgr.async_save(grp(members=[A], triggers=[SENS]))
+    await set_state(hass, SENS, "on")
+    assert sorted(ids(on)[0]) == [A, X]
+    await set_state(hass, SENS, "off")
+    assert sorted(ids(off)[0]) == [A, X]
+
+
+async def test_group_event_impulse(hass, mgr, calls, g):
+    on, off = calls
+    ev = "event.ring_motion"
+    hass.states.async_set(ev, "2026-11-20T10:00:00")
+    await mgr.async_save(grp(members=[A], triggers=[ev]))
+    await set_state(hass, ev, "2026-11-20T10:05:00")
+    assert sorted(ids(on)[0]) == [A, X]
+    await tick(hass, 20)
+    assert not off
+    await tick(hass, 31)  # 30 s Mindestdauer
+    assert sorted(ids(off)[0]) == [A, X]
+
+
+@pytest.mark.parametrize(("sun", "expect"), [("above_horizon", 0), ("below_horizon", 1)])
+async def test_group_only_dark(hass, mgr, calls, g, sun, expect):
+    on, _ = calls
+    hass.states.async_set("sun.sun", sun)
+    await mgr.async_save(grp(only_dark=True))
+    await set_state(hass, A, "on")
+    assert len(on) == expect
+
+
+async def test_group_external_off_of_owned(hass, mgr, calls, g):
+    on, off = calls
+    await mgr.async_save(grp())
+    await set_state(hass, A, "on")
+    await own(hass, on, B, "on")
+    await set_state(hass, B, "off")  # extern aus -> nicht mehr owned
+    assert not off
+    await set_state(hass, A, "off")
+    assert ids(off) == [[X]]
+
+
+async def test_group_owned_reported_on_again_stays_owned(hass, mgr, calls, g):
+    on, off = calls
+    await mgr.async_save(grp())
+    await set_state(hass, A, "on")
+    await own(hass, on, B, "on")
+    await set_state(hass, B, "on", brightness=5)  # extern erneut "an" gemeldet
+    await set_state(hass, A, "off")
+    assert sorted(ids(off)[0]) == [B, X]
+
+
+async def test_group_test_and_unload(hass, mgr, calls, g):
+    on, off = calls
+    saved = await mgr.async_save(grp())
+    mgr.async_test(saved["id"])
+    await hass.async_block_till_done()
+    assert sorted(ids(on)[0]) == [A, B, X] and not off
+    await tick(hass, 11)
+    assert sorted(ids(off)[0]) == [A, B, X]
+    mgr.async_test(saved["id"])
+    await hass.async_block_till_done()
+    mgr.async_unload()
+    await hass.async_block_till_done()
+    assert len(off) == 2 and not mgr._timer and not mgr._unsub and not mgr._active
+
+
+async def test_group_list_active_and_legacy_kind(hass, mgr, calls, g):
+    saved = await mgr.async_save(grp())
+    await mgr.async_save(rule())
+    mgr.rules["old"] = {k: v for k, v in rule().items()} | {"id": "old"}  # Altregel ohne kind
+    lst = {r["id"]: r for r in mgr.async_list()}
+    assert lst[saved["id"]]["active"] is False and lst["old"]["kind"] == "link"
+    await set_state(hass, A, "on")
+    assert {r["id"]: r for r in mgr.async_list()}[saved["id"]]["active"] is True
+
+
+async def test_ws_group_validation_and_save(hass, hass_ws_client, calls, g):
+    ws = await _ws(hass, hass_ws_client)
+    ok = grp()
+    del ok["enabled"]
+    saved = (await call(ws, 1, "save", rule=ok))["result"]["rule"]
+    assert saved["kind"] == "group" and saved["id"]
+    lst = (await call(ws, 2, "list"))["result"]["rules"]
+    assert lst[0]["kind"] == "group" and lst[0]["active"] is False
+    for i, (bad, code) in enumerate([
+        ({"members": [A]}, "invalid"), ({"members": [A], "triggers": []}, "invalid"),
+        ({"followers": [A]}, "invalid"), ({"members": [A, B, B]}, "invalid"),
+        ({"followers": ["light.gibt_es_nicht"]}, "unknown_entity"), ({"members": [A, "siren.x"]}, "invalid"),
+        ({"hold_seconds": 4000}, "invalid_format"), ({"name": ""}, "invalid_format"),
+    ], 10):
+        assert (await call(ws, i, "save", rule={**ok, **bad}))["error"]["code"] == code, bad
+    # 1 Mitglied + 1 Auslöser ist gültig
+    assert (await call(ws, 30, "save", rule={**ok, "members": [A], "triggers": [SENS]}))["success"]

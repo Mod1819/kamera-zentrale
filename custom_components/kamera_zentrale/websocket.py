@@ -103,7 +103,7 @@ def ws_links_list(hass, connection, msg):
 @websocket_api.require_admin
 @websocket_api.websocket_command({
     vol.Required("type"): f"{DOMAIN}/links/save",
-    vol.Required("rule"): links.RULE_SCHEMA,
+    vol.Required("rule"): links.validate_rule,
 })
 @websocket_api.async_response
 async def ws_links_save(hass, connection, msg):

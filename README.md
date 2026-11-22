@@ -6,6 +6,10 @@ Sie baut keine eigene Kameraverbindung auf, sondern nutzt die Entitäten der off
 
 ## Funktionen
 
+### v0.6.0 (Licht-Verbund)
+- Neuer Regeltyp **Licht-Verbund** (Verbund-Seite → „+ Neu“ → Licht-Verbund). Bestehende Kopplungen („Wenn A → B“) laufen unverändert weiter.
+- Siehe Abschnitt „Licht-Verbund“ unten.
+
 ### v0.5.0 (Sensor „Clip-Auslöser“)
 - Pro Reolink-Kamera ein `binary_sensor` **Clip-Auslöser** (hängt am Kamera-Gerät, Klasse `motion`): AN, solange ein Erkennungssensor (Person/Fahrzeug/Tier/Bewegung) an ist, dessen Typ in der **FTP-Spalte** der Erkennungs-Matrix eingeschaltet ist. Push-Automationen passen so automatisch zur FTP-Einstellung (kein Push ohne Clip).
 - Attribute: `type` (people|vehicle|dog_cat|md), `type_label` (Person|Fahrzeug|Tier|Bewegung), `enabled_types`, `source_entity`, `matrix_updated`.
@@ -92,3 +96,13 @@ uv venv -p 3.12 .venv && uv pip install -p .venv pytest-homeassistant-custom-com
 
 ## Lizenz
 MIT
+
+## Licht-Verbund
+Regel `kind: "group"` (WebSocket `links/save`): `{name, enabled, members, followers, triggers, hold_seconds (0–3600), only_dark}`.
+- **Mitglieder** (light/switch) schalten sich gegenseitig: geht eines extern an, gehen alle Mitglieder und **Zusatzgeräte** (`followers`: light/switch/siren) an; gehen alle Initiatoren aus, gehen die vom Verbund eingeschalteten Geräte aus (nach `hold_seconds`, erneuter Initiator bricht den Nachlauf ab).
+- **Zusätzliche Auslöser** (`triggers`: binary_sensor/event/light/switch): Sensor „an“ aktiviert den Verbund; ein `event` ist ein Impuls (mind. 30 s aktiv).
+- Gültig: ≥ 2 Mitglieder oder (≥ 1 Mitglied und ≥ 1 Auslöser); keine Entität doppelt.
+- Eigene Schaltungen werden über einen eigenen HA-Context erkannt → keine Schleifen. Ein Gerät, das schon an war, wird nie vom Verbund ausgeschaltet; extern ausgeschaltete Geräte gibt der Verbund frei.
+- `only_dark` wird nur beim Aktivieren geprüft (`sun.sun` = below_horizon, falls vorhanden). „Testen“ schaltet 10 s an.
+- `links/list` liefert `kind` und bei Verbünden `active`.
+- Schnellvorschlag „Garten-Licht-Verbund“ (Garten-Licht ⇄ Scheinwerfer); die alte Kopplung „Ring Garten-Licht → TrackMix-Scheinwerfer“ kann dabei deaktiviert werden.
